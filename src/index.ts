@@ -32,8 +32,8 @@ const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const pendingAuths = new Map<string, { codeChallenge: string; redirectUri: string; expiresAt: number }>();
 const validTokens = new Set<string>();
 
-// SSE transport storage (one per session)
-const transports = new Map<string, SSEServerTransport>();
+// SSE transport storage - keyed by sessionId
+const transports: { [sessionId: string]: SSEServerTransport } = {};
 
 // Define the tools
 const TOOLS: Tool[] = [
@@ -381,99 +381,54 @@ function startHttpServer() {
   });
 
   // ============================================
-  // MCP SSE Endpoint at ROOT (Claude connects here)
+  // MCP SSE Endpoint - GET establishes SSE stream
   // ============================================
-  app.get("/", authMiddleware, async (req, res) => {
+  app.get("/", authMiddleware, async (req: Request, res: Response) => {
     console.log("🔌 New SSE connection at /");
 
+    // Create transport that will send POST messages to /message endpoint
     const transport = new SSEServerTransport("/", res);
-    const sessionId = crypto.randomUUID();
-    transports.set(sessionId, transport);
 
-    const server = createMCPServer();
+    // Store transport by sessionId for later POST message handling
+    transports[transport.sessionId] = transport;
+    console.log(`   Session ID: ${transport.sessionId}`);
 
+    // Clean up on disconnect
     res.on("close", () => {
-      console.log("🔌 SSE connection closed");
-      transports.delete(sessionId);
+      console.log(`🔌 SSE connection closed: ${transport.sessionId}`);
+      delete transports[transport.sessionId];
     });
 
-    await server.connect(transport);
-  });
-
-  app.post("/", authMiddleware, async (req, res) => {
-    console.log("📨 POST request at /");
-
-    // Create a new transport and server for each request
-    const transport = new SSEServerTransport("/", res);
+    // Connect MCP server to this transport
     const server = createMCPServer();
     await server.connect(transport);
-    await transport.handlePostMessage(req, res);
   });
 
   // ============================================
-  // MCP SSE Endpoint at /sse (alternative)
+  // MCP Message Endpoint - POST receives messages
   // ============================================
-  app.get("/sse", authMiddleware, async (req, res) => {
-    console.log("🔌 New SSE connection");
-
-    const transport = new SSEServerTransport("/messages", res);
-    const sessionId = crypto.randomUUID();
-    transports.set(sessionId, transport);
-
-    const server = createMCPServer();
-
-    res.on("close", () => {
-      console.log("🔌 SSE connection closed");
-      transports.delete(sessionId);
-    });
-
-    await server.connect(transport);
-  });
-
-  // MCP Messages endpoint
-  app.post("/messages", authMiddleware, async (req, res) => {
+  app.post("/", authMiddleware, async (req: Request, res: Response) => {
     const sessionId = req.query.sessionId as string;
-    const transport = transports.get(sessionId);
+    console.log(`📨 POST message for session: ${sessionId}`);
 
+    const transport = transports[sessionId];
     if (!transport) {
-      // Handle stateless request
-      const messageTransport = new SSEServerTransport("/messages", res);
-      const server = createMCPServer();
-      await server.connect(messageTransport);
-      await messageTransport.handlePostMessage(req, res);
-      return;
+      console.error(`❌ No transport found for session: ${sessionId}`);
+      return res.status(400).json({ error: "Invalid or expired session" });
     }
 
-    await transport.handlePostMessage(req, res);
-  });
-
-  // ============================================
-  // Fallback SSE at root /mcp path
-  // ============================================
-  app.get("/mcp", authMiddleware, async (req, res) => {
-    console.log("🔌 New MCP SSE connection at /mcp");
-
-    const transport = new SSEServerTransport("/mcp", res);
-    const server = createMCPServer();
-
-    res.on("close", () => {
-      console.log("🔌 MCP connection closed");
-    });
-
-    await server.connect(transport);
-  });
-
-  app.post("/mcp", authMiddleware, async (req, res) => {
-    const transport = new SSEServerTransport("/mcp", res);
-    const server = createMCPServer();
-    await server.connect(transport);
-    await transport.handlePostMessage(req, res);
+    try {
+      await transport.handlePostMessage(req, res, req.body);
+    } catch (error: any) {
+      console.error(`❌ Error handling message: ${error.message}`);
+      res.status(500).json({ error: error.message });
+    }
   });
 
   app.listen(PORT, () => {
     console.log(`🚀 Gemini Imagen MCP Server running on port ${PORT}`);
     console.log(`🔐 OAuth 2.0 + SSE transport enabled`);
-    console.log(`   SSE endpoint: ${SERVER_URL}/sse`);
+    console.log(`   Server URL: ${SERVER_URL}`);
     console.log(`   Health: ${SERVER_URL}/health`);
   });
 }
