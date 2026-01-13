@@ -17,17 +17,28 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const USE_HTTP = process.env.USE_HTTP === "true";
 const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL;
+const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1";
+const OPENROUTER_APP_URL = process.env.OPENROUTER_APP_URL;
+const OPENROUTER_APP_NAME = process.env.OPENROUTER_APP_NAME;
+const USE_OPENROUTER = Boolean(OPENROUTER_API_KEY || OPENROUTER_MODEL);
 
 // 🔐 Your secret password
 const AUTH_PASSWORD = process.env.AUTH_PASSWORD || "changeme";
 
-if (!GEMINI_API_KEY) {
-  console.error("ERROR: GEMINI_API_KEY environment variable is required");
+if (USE_OPENROUTER) {
+  if (!OPENROUTER_API_KEY || !OPENROUTER_MODEL) {
+    console.error("ERROR: OPENROUTER_API_KEY and OPENROUTER_MODEL are required to use OpenRouter");
+    process.exit(1);
+  }
+} else if (!GEMINI_API_KEY) {
+  console.error("ERROR: GEMINI_API_KEY environment variable is required when OpenRouter is not configured");
   process.exit(1);
 }
 
-// Initialize Gemini client
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+// Initialize Gemini client (only when OpenRouter is not used)
+const genAI = USE_OPENROUTER ? null : new GoogleGenerativeAI(GEMINI_API_KEY!);
 
 // OAuth storage
 const pendingAuths = new Map<string, { codeChallenge: string; redirectUri: string; expiresAt: number }>();
@@ -97,26 +108,137 @@ const TOOLS: Tool[] = [
   },
 ];
 
+const getOpenRouterHeaders = (): Record<string, string> => {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+    "Content-Type": "application/json",
+  };
+  if (OPENROUTER_APP_URL) {
+    headers["HTTP-Referer"] = OPENROUTER_APP_URL;
+  }
+  if (OPENROUTER_APP_NAME) {
+    headers["X-Title"] = OPENROUTER_APP_NAME;
+  }
+  return headers;
+};
+
+const parseDataUrl = (dataUrl: string): { image_base64: string; mime_type: string } => {
+  if (!dataUrl.startsWith("data:")) {
+    throw new Error("OpenRouter response did not include a data URL image");
+  }
+  const [meta, data] = dataUrl.split(",", 2);
+  const match = /^data:([^;]+);base64$/i.exec(meta);
+  return {
+    image_base64: data,
+    mime_type: match?.[1] || "image/png",
+  };
+};
+
+const buildStyledPrompt = (prompt: string, style?: string): string => {
+  if (!style) return prompt;
+  const styleMap: Record<string, string> = {
+    photorealistic: "photorealistic, high detail, professional photography",
+    artistic: "artistic, painterly, creative interpretation",
+    cartoon: "cartoon style, animated, colorful",
+    sketch: "pencil sketch, hand-drawn, artistic",
+    "3d-render": "3D rendered, CGI, computer graphics",
+  };
+  return `${prompt}, ${styleMap[style] || style}`;
+};
+
+async function generateImageWithOpenRouter(
+  prompt: string,
+  aspectRatio: string = "1:1",
+  style?: string
+): Promise<{ image_base64: string; mime_type: string }> {
+  const styledPrompt = buildStyledPrompt(prompt, style);
+  const aspectHint = aspectRatio !== "1:1" ? ` (aspect ratio ${aspectRatio})` : "";
+  const body = {
+    model: OPENROUTER_MODEL,
+    modalities: ["image", "text"],
+    messages: [
+      {
+        role: "user",
+        content: [{ type: "text", text: `${styledPrompt}${aspectHint}` }],
+      },
+    ],
+  };
+
+  const response = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: getOpenRouterHeaders(),
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    throw new Error(`OpenRouter error ${response.status}: ${errorText}`);
+  }
+
+  const data = await response.json();
+  const imageUrl = data?.choices?.[0]?.message?.images?.[0]?.image_url?.url;
+  if (!imageUrl) {
+    throw new Error("OpenRouter did not return an image");
+  }
+
+  return parseDataUrl(imageUrl);
+}
+
+async function editImageWithOpenRouter(
+  imageBase64: string,
+  editPrompt: string
+): Promise<{ image_base64: string; mime_type: string }> {
+  const dataUrl = imageBase64.startsWith("data:")
+    ? imageBase64
+    : `data:image/png;base64,${imageBase64}`;
+  const body = {
+    model: OPENROUTER_MODEL,
+    modalities: ["image", "text"],
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: `Edit this image: ${editPrompt}` },
+          { type: "image_url", image_url: { url: dataUrl } },
+        ],
+      },
+    ],
+  };
+
+  const response = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: getOpenRouterHeaders(),
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    throw new Error(`OpenRouter error ${response.status}: ${errorText}`);
+  }
+
+  const data = await response.json();
+  const imageUrl = data?.choices?.[0]?.message?.images?.[0]?.image_url?.url;
+  if (!imageUrl) {
+    throw new Error("OpenRouter did not return an image");
+  }
+
+  return parseDataUrl(imageUrl);
+}
+
 // Image generation function
 async function generateImage(
   prompt: string,
   aspectRatio: string = "1:1",
   style?: string
 ): Promise<{ image_base64: string; mime_type: string }> {
-  try {
-    let fullPrompt = prompt;
-    if (style) {
-      const styleMap: Record<string, string> = {
-        photorealistic: "photorealistic, high detail, professional photography",
-        artistic: "artistic, painterly, creative interpretation",
-        cartoon: "cartoon style, animated, colorful",
-        sketch: "pencil sketch, hand-drawn, artistic",
-        "3d-render": "3D rendered, CGI, computer graphics",
-      };
-      fullPrompt = `${prompt}, ${styleMap[style] || style}`;
-    }
+  if (USE_OPENROUTER) {
+    return generateImageWithOpenRouter(prompt, aspectRatio, style);
+  }
 
-    const model = genAI.getGenerativeModel({ model: "imagen-3.0-generate-001" });
+  try {
+    const fullPrompt = buildStyledPrompt(prompt, style);
+
+    const model = genAI!.getGenerativeModel({ model: "imagen-3.0-generate-001" });
     const result = await model.generateContent({
       contents: [{ role: "user", parts: [{ text: fullPrompt }] }],
       generationConfig: {
@@ -136,7 +258,7 @@ async function generateImage(
     throw new Error("No image generated");
   } catch (error: any) {
     console.log("Trying fallback model...");
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-exp" });
+    const model = genAI!.getGenerativeModel({ model: "gemini-2.0-flash-exp" });
     const result = await model.generateContent({
       contents: [{ role: "user", parts: [{ text: `Generate an image: ${prompt}` }] }],
       generationConfig: {
@@ -158,8 +280,15 @@ async function generateImage(
 }
 
 // Image editing function
-async function editImage(imageBase64: string, editPrompt: string): Promise<{ image_base64: string; mime_type: string }> {
-  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-exp" });
+async function editImage(
+  imageBase64: string,
+  editPrompt: string
+): Promise<{ image_base64: string; mime_type: string }> {
+  if (USE_OPENROUTER) {
+    return editImageWithOpenRouter(imageBase64, editPrompt);
+  }
+
+  const model = genAI!.getGenerativeModel({ model: "gemini-2.0-flash-exp" });
   const result = await model.generateContent({
     contents: [
       {
@@ -511,6 +640,7 @@ function startHttpServer() {
     console.log(`🔐 OAuth 2.0 + Streamable HTTP transport enabled`);
     console.log(`   Server URL: ${SERVER_URL}`);
     console.log(`   Health: ${SERVER_URL}/health`);
+    console.log(`   Provider: ${USE_OPENROUTER ? `OpenRouter (${OPENROUTER_MODEL})` : "Gemini"}`);
   });
 }
 

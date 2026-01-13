@@ -68,9 +68,14 @@ If you use a different MCP client, set the remote MCP URL to your Railway URL (n
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GEMINI_API_KEY` | Yes | Your Google Gemini API key |
+| `GEMINI_API_KEY` | Yes (if OpenRouter not used) | Your Google Gemini API key |
 | `AUTH_PASSWORD` | Yes | Your secret password for login |
 | `SERVER_URL` | Yes | Your full Railway URL (including https://) |
+| `OPENROUTER_API_KEY` | Optional | Use OpenRouter instead of Gemini |
+| `OPENROUTER_MODEL` | Required if OpenRouter | Exact OpenRouter model ID to use |
+| `OPENROUTER_BASE_URL` | Optional | Defaults to `https://openrouter.ai/api/v1` |
+| `OPENROUTER_APP_URL` | Optional | App URL for OpenRouter attribution |
+| `OPENROUTER_APP_NAME` | Optional | App name for OpenRouter attribution |
 | `USE_HTTP` | Auto | Set automatically by Dockerfile |
 | `PORT` | Auto | Set automatically by Railway |
 
