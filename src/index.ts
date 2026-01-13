@@ -17,7 +17,6 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const USE_HTTP = process.env.USE_HTTP === "true";
 const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
-const AUTH_BASE_URL = new URL(SERVER_URL).origin;
 
 // 🔐 Your secret password
 const AUTH_PASSWORD = process.env.AUTH_PASSWORD || "changeme";
@@ -33,6 +32,20 @@ const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 // OAuth storage
 const pendingAuths = new Map<string, { codeChallenge: string; redirectUri: string; expiresAt: number }>();
 const validTokens = new Set<string>();
+
+const getBaseUrl = (req: Request): string => {
+  if (process.env.SERVER_URL) {
+    try {
+      return new URL(process.env.SERVER_URL).origin;
+    } catch {
+      // Fall through to request-derived base URL.
+    }
+  }
+
+  const forwardedProto = (req.headers["x-forwarded-proto"] as string | undefined) || req.protocol;
+  const forwardedHost = (req.headers["x-forwarded-host"] as string | undefined) || req.get("host");
+  return `${forwardedProto}://${forwardedHost}`;
+};
 
 // Streamable HTTP transport storage - keyed by sessionId
 const streamableTransports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
@@ -220,11 +233,12 @@ function createMCPServer(): Server {
 
 // Auth middleware
 function authMiddleware(req: Request, res: Response, next: NextFunction) {
+  const baseUrl = getBaseUrl(req);
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     res.setHeader(
       "WWW-Authenticate",
-      `Bearer realm="mcp", resource_metadata="${AUTH_BASE_URL}/.well-known/oauth-protected-resource"`
+      `Bearer realm="mcp", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`
     );
     return res.status(401).json({ error: "Missing Authorization header" });
   }
@@ -232,7 +246,7 @@ function authMiddleware(req: Request, res: Response, next: NextFunction) {
   if (!validTokens.has(token)) {
     res.setHeader(
       "WWW-Authenticate",
-      `Bearer realm="mcp", resource_metadata="${AUTH_BASE_URL}/.well-known/oauth-protected-resource"`
+      `Bearer realm="mcp", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`
     );
     return res.status(403).json({ error: "Invalid token" });
   }
@@ -242,6 +256,7 @@ function authMiddleware(req: Request, res: Response, next: NextFunction) {
 // HTTP server with Streamable HTTP transport
 function startHttpServer() {
   const app = express();
+  app.set("trust proxy", true);
   app.use(cors());
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ extended: true }));
@@ -250,19 +265,21 @@ function startHttpServer() {
   // OAuth 2.0 Discovery
   // ============================================
   app.get("/.well-known/oauth-protected-resource", (_req, res) => {
+    const baseUrl = getBaseUrl(_req);
     res.json({
-      resource: SERVER_URL,
-      authorization_servers: [AUTH_BASE_URL],
+      resource: baseUrl,
+      authorization_servers: [baseUrl],
       scopes_supported: ["mcp:tools"],
     });
   });
 
   app.get("/.well-known/oauth-authorization-server", (req, res) => {
+    const baseUrl = getBaseUrl(req);
     res.json({
-      issuer: AUTH_BASE_URL,
-      authorization_endpoint: `${AUTH_BASE_URL}/authorize`,
-      token_endpoint: `${AUTH_BASE_URL}/token`,
-      registration_endpoint: `${AUTH_BASE_URL}/register`,
+      issuer: baseUrl,
+      authorization_endpoint: `${baseUrl}/authorize`,
+      token_endpoint: `${baseUrl}/token`,
+      registration_endpoint: `${baseUrl}/register`,
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code"],
       code_challenge_methods_supported: ["S256"],
