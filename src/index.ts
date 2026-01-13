@@ -381,7 +381,37 @@ function startHttpServer() {
   });
 
   // ============================================
-  // MCP SSE Endpoint (main connection)
+  // MCP SSE Endpoint at ROOT (Claude connects here)
+  // ============================================
+  app.get("/", authMiddleware, async (req, res) => {
+    console.log("🔌 New SSE connection at /");
+
+    const transport = new SSEServerTransport("/", res);
+    const sessionId = crypto.randomUUID();
+    transports.set(sessionId, transport);
+
+    const server = createMCPServer();
+
+    res.on("close", () => {
+      console.log("🔌 SSE connection closed");
+      transports.delete(sessionId);
+    });
+
+    await server.connect(transport);
+  });
+
+  app.post("/", authMiddleware, async (req, res) => {
+    console.log("📨 POST request at /");
+
+    // Create a new transport and server for each request
+    const transport = new SSEServerTransport("/", res);
+    const server = createMCPServer();
+    await server.connect(transport);
+    await transport.handlePostMessage(req, res);
+  });
+
+  // ============================================
+  // MCP SSE Endpoint at /sse (alternative)
   // ============================================
   app.get("/sse", authMiddleware, async (req, res) => {
     console.log("🔌 New SSE connection");
