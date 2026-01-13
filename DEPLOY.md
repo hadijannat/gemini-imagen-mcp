@@ -1,6 +1,6 @@
 # Gemini Imagen MCP Server - Deployment Guide
 
-This server lets you use Google Imagen 3.0 in Claude Cowork, protected by password authentication.
+This server lets you use Google Imagen 3.0 in Claude Code, protected by password authentication.
 
 ## How It Works
 
@@ -42,15 +42,15 @@ gh repo create gemini-imagen-mcp --private --source=. --push
 
 ---
 
-## Step 2: Add to Claude Cowork
+## Step 2: Add to Claude Code
 
-1. Go to **Settings** → **Connectors**
-2. Click **"Add custom connector"**
-3. Fill in:
-   - **Name**: `gemini`
-   - **Remote MCP server URL**: Your Railway URL
-4. **Leave OAuth fields empty** - not needed!
-5. Click **"Add"**
+Add the remote MCP server in Claude Code:
+
+```bash
+claude mcp add gemini https://your-app.up.railway.app
+```
+
+If you use a different MCP client, set the remote MCP URL to your Railway URL (no extra path).
 
 ---
 
@@ -111,3 +111,5 @@ Once connected, Claude can use:
 **Token expired**: Tokens last 24 hours. Just reconnect from Claude.
 
 **Connection refused**: Check that `SERVER_URL` matches your actual Railway URL exactly.
+
+**Claude Code shows MCP transport errors**: Make sure you're using the base Railway URL and have redeployed this server. Claude Code expects Streamable HTTP.

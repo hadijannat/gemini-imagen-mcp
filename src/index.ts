@@ -1,10 +1,11 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
   Tool,
+  isInitializeRequest,
 } from "@modelcontextprotocol/sdk/types.js";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import express, { Request, Response, NextFunction } from "express";
@@ -32,8 +33,8 @@ const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const pendingAuths = new Map<string, { codeChallenge: string; redirectUri: string; expiresAt: number }>();
 const validTokens = new Set<string>();
 
-// SSE transport storage - keyed by sessionId
-const transports: { [sessionId: string]: SSEServerTransport } = {};
+// Streamable HTTP transport storage - keyed by sessionId
+const streamableTransports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
 
 // Define the tools
 const TOOLS: Tool[] = [
@@ -229,20 +230,11 @@ function authMiddleware(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-// HTTP server with SSE transport
+// HTTP server with Streamable HTTP transport
 function startHttpServer() {
   const app = express();
   app.use(cors());
-
-  // Don't parse JSON for MCP endpoints - let handlePostMessage do it
-  app.use((req, res, next) => {
-    if (req.path === "/" && req.method === "POST") {
-      // Skip body parsing for MCP POST - handlePostMessage handles it
-      next();
-    } else {
-      express.json({ limit: "50mb" })(req, res, next);
-    }
-  });
+  app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ extended: true }));
 
   // ============================================
@@ -390,57 +382,104 @@ function startHttpServer() {
   });
 
   // ============================================
-  // MCP SSE Endpoint - GET establishes SSE stream
+  // MCP Streamable HTTP Endpoint
   // ============================================
-  app.get("/", authMiddleware, async (req: Request, res: Response) => {
-    console.log("🔌 New SSE connection at /");
-
-    // Create transport that will send POST messages to /message endpoint
-    const transport = new SSEServerTransport("/", res);
-
-    // Store transport by sessionId for later POST message handling
-    transports[transport.sessionId] = transport;
-    console.log(`   Session ID: ${transport.sessionId}`);
-
-    // Clean up on disconnect
-    res.on("close", () => {
-      console.log(`🔌 SSE connection closed: ${transport.sessionId}`);
-      delete transports[transport.sessionId];
-    });
-
-    // Connect MCP server to this transport
-    const server = createMCPServer();
-    await server.connect(transport);
-  });
-
-  // ============================================
-  // MCP Message Endpoint - POST receives messages
-  // ============================================
-  app.post("/", authMiddleware, async (req: Request, res: Response) => {
-    const sessionId = req.query.sessionId as string;
-    console.log(`📨 POST message for session: ${sessionId}`);
-
-    const transport = transports[sessionId];
-    if (!transport) {
-      console.error(`❌ No transport found for session: ${sessionId}`);
-      return res.status(400).json({ error: "Invalid or expired session" });
+  const isInitializeBody = (body: unknown): boolean => {
+    if (!body) return false;
+    if (Array.isArray(body)) {
+      return body.some((message) => isInitializeRequest(message as any));
     }
+    return isInitializeRequest(body as any);
+  };
+
+  const mcpPostHandler = async (req: Request, res: Response) => {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    console.log(`📨 MCP POST${sessionId ? ` session ${sessionId}` : ""}`);
 
     try {
-      // handlePostMessage reads and parses the body itself
-      await transport.handlePostMessage(req, res);
+      if (sessionId && streamableTransports[sessionId]) {
+        const transport = streamableTransports[sessionId];
+        await transport.handleRequest(req, res, req.body);
+        return;
+      } else if (!sessionId && isInitializeBody(req.body)) {
+        const transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => crypto.randomUUID(),
+          onsessioninitialized: (newSessionId) => {
+            streamableTransports[newSessionId] = transport;
+            console.log(`✅ MCP session initialized: ${newSessionId}`);
+          },
+        });
+
+        transport.onclose = () => {
+          const sid = transport?.sessionId;
+          if (sid && streamableTransports[sid]) {
+            delete streamableTransports[sid];
+            console.log(`🔌 MCP session closed: ${sid}`);
+          }
+        };
+
+        const server = createMCPServer();
+        await server.connect(transport);
+
+        await transport.handleRequest(req, res, req.body);
+        return;
+      } else {
+        res.status(400).json({
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Bad Request: No valid session ID provided" },
+          id: null,
+        });
+        return;
+      }
     } catch (error: any) {
-      console.error(`❌ Error handling message: ${error.message}`);
-      // Only send error if headers haven't been sent
+      console.error(`❌ Error handling MCP POST: ${error.message}`);
       if (!res.headersSent) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({
+          jsonrpc: "2.0",
+          error: { code: -32603, message: "Internal server error" },
+          id: null,
+        });
       }
     }
-  });
+  };
+
+  const mcpGetHandler = async (req: Request, res: Response) => {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    if (!sessionId || !streamableTransports[sessionId]) {
+      return res.status(400).send("Invalid or missing session ID");
+    }
+    try {
+      await streamableTransports[sessionId].handleRequest(req, res);
+    } catch (error: any) {
+      console.error(`❌ Error handling MCP GET: ${error.message}`);
+      if (!res.headersSent) {
+        res.status(500).send("Internal server error");
+      }
+    }
+  };
+
+  const mcpDeleteHandler = async (req: Request, res: Response) => {
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    if (!sessionId || !streamableTransports[sessionId]) {
+      return res.status(400).send("Invalid or missing session ID");
+    }
+    try {
+      await streamableTransports[sessionId].handleRequest(req, res);
+    } catch (error: any) {
+      console.error(`❌ Error handling MCP DELETE: ${error.message}`);
+      if (!res.headersSent) {
+        res.status(500).send("Internal server error");
+      }
+    }
+  };
+
+  app.post("/", authMiddleware, mcpPostHandler);
+  app.get("/", authMiddleware, mcpGetHandler);
+  app.delete("/", authMiddleware, mcpDeleteHandler);
 
   app.listen(PORT, () => {
     console.log(`🚀 Gemini Imagen MCP Server running on port ${PORT}`);
-    console.log(`🔐 OAuth 2.0 + SSE transport enabled`);
+    console.log(`🔐 OAuth 2.0 + Streamable HTTP transport enabled`);
     console.log(`   Server URL: ${SERVER_URL}`);
     console.log(`   Health: ${SERVER_URL}/health`);
   });
