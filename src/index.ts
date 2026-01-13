@@ -156,6 +156,7 @@ async function generateImageWithOpenRouter(
   const body = {
     model: OPENROUTER_MODEL,
     modalities: ["image", "text"],
+    image_config: { aspect_ratio: aspectRatio },
     messages: [
       {
         role: "user",
