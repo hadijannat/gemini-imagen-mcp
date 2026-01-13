@@ -17,6 +17,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const USE_HTTP = process.env.USE_HTTP === "true";
 const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
+const AUTH_BASE_URL = new URL(SERVER_URL).origin;
 
 // 🔐 Your secret password
 const AUTH_PASSWORD = process.env.AUTH_PASSWORD || "changeme";
@@ -221,10 +222,18 @@ function createMCPServer(): Server {
 function authMiddleware(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    res.setHeader(
+      "WWW-Authenticate",
+      `Bearer realm="mcp", resource_metadata="${AUTH_BASE_URL}/.well-known/oauth-protected-resource"`
+    );
     return res.status(401).json({ error: "Missing Authorization header" });
   }
   const token = authHeader.substring(7);
   if (!validTokens.has(token)) {
+    res.setHeader(
+      "WWW-Authenticate",
+      `Bearer realm="mcp", resource_metadata="${AUTH_BASE_URL}/.well-known/oauth-protected-resource"`
+    );
     return res.status(403).json({ error: "Invalid token" });
   }
   next();
@@ -240,12 +249,20 @@ function startHttpServer() {
   // ============================================
   // OAuth 2.0 Discovery
   // ============================================
+  app.get("/.well-known/oauth-protected-resource", (_req, res) => {
+    res.json({
+      resource: SERVER_URL,
+      authorization_servers: [AUTH_BASE_URL],
+      scopes_supported: ["mcp:tools"],
+    });
+  });
+
   app.get("/.well-known/oauth-authorization-server", (req, res) => {
     res.json({
-      issuer: SERVER_URL,
-      authorization_endpoint: `${SERVER_URL}/authorize`,
-      token_endpoint: `${SERVER_URL}/token`,
-      registration_endpoint: `${SERVER_URL}/register`,
+      issuer: AUTH_BASE_URL,
+      authorization_endpoint: `${AUTH_BASE_URL}/authorize`,
+      token_endpoint: `${AUTH_BASE_URL}/token`,
+      registration_endpoint: `${AUTH_BASE_URL}/register`,
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code"],
       code_challenge_methods_supported: ["S256"],
