@@ -1,131 +1,113 @@
 # Gemini Imagen MCP Server - Deployment Guide
 
-This MCP server enables Google Imagen 3.0 image generation in Claude Cowork.
+This server lets you use Google Imagen 3.0 in Claude Cowork, protected by password authentication.
 
-## Prerequisites
+## How It Works
 
-1. A Google Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey)
-2. A GitHub account
-3. An account on Railway, Render, or Fly.io
+1. You add the connector in Claude with just the URL
+2. When you first connect, a **login page** opens
+3. You enter **your secret password**
+4. Claude gets authorized - only you can use it!
 
 ---
 
-## Option A: Deploy to Railway (Easiest)
+## Step 1: Deploy to Railway
 
-### Step 1: Push to GitHub
+### Push to GitHub
 
 ```bash
-# Initialize git and push to GitHub
+cd gemini-imagen-mcp-server
 git init
 git add .
 git commit -m "Initial commit"
-gh repo create gemini-imagen-mcp --public --source=. --push
+gh repo create gemini-imagen-mcp --private --source=. --push
 ```
 
-Or create a repo manually on GitHub and push.
+### Deploy on Railway
 
-### Step 2: Deploy on Railway
-
-1. Go to [railway.app](https://railway.app) and sign in
-2. Click **"New Project"** → **"Deploy from GitHub repo"**
+1. Go to [railway.app](https://railway.app)
+2. **New Project** → **Deploy from GitHub repo**
 3. Select your `gemini-imagen-mcp` repository
-4. Railway will auto-detect the Dockerfile
-5. Go to **Variables** tab and add:
-   - `GEMINI_API_KEY` = your API key
-6. Railway will deploy automatically
-7. Go to **Settings** → **Networking** → **Generate Domain**
-8. Copy your URL (e.g., `https://gemini-imagen-mcp-production.up.railway.app`)
+4. Go to **Variables** tab and add these 3 variables:
+
+| Variable | Value |
+|----------|-------|
+| `GEMINI_API_KEY` | Your Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey) |
+| `AUTH_PASSWORD` | A secret password only you know (e.g., `MySecretPass123!`) |
+| `SERVER_URL` | Your Railway URL (add after step 5) |
+
+5. Go to **Settings** → **Networking** → **Generate Domain**
+6. Copy your URL (e.g., `https://gemini-imagen-mcp-production.up.railway.app`)
+7. Go back to **Variables** and set `SERVER_URL` to this URL
 
 ---
 
-## Option B: Deploy to Render
-
-### Step 1: Push to GitHub (same as above)
-
-### Step 2: Deploy on Render
-
-1. Go to [render.com](https://render.com) and sign in
-2. Click **"New"** → **"Web Service"**
-3. Connect your GitHub repo
-4. Render will auto-detect the Dockerfile
-5. Add environment variable:
-   - `GEMINI_API_KEY` = your API key
-6. Click **"Create Web Service"**
-7. Copy your URL (e.g., `https://gemini-imagen-mcp.onrender.com`)
-
----
-
-## Option C: Deploy to Fly.io
-
-### Step 1: Install Fly CLI
-
-```bash
-curl -L https://fly.io/install.sh | sh
-fly auth login
-```
-
-### Step 2: Deploy
-
-```bash
-fly launch --name gemini-imagen-mcp
-fly secrets set GEMINI_API_KEY=your_api_key_here
-fly deploy
-```
-
-Your URL will be: `https://gemini-imagen-mcp.fly.dev`
-
----
-
-## Add to Claude Cowork
-
-Once deployed, add the connector in Claude Desktop:
+## Step 2: Add to Claude Cowork
 
 1. Go to **Settings** → **Connectors**
 2. Click **"Add custom connector"**
 3. Fill in:
-   - **Name**: `gemini` (or any name you prefer)
-   - **Remote MCP server URL**: Your deployed URL (e.g., `https://gemini-imagen-mcp-production.up.railway.app`)
-4. Click **"Add"**
+   - **Name**: `gemini`
+   - **Remote MCP server URL**: Your Railway URL
+4. **Leave OAuth fields empty** - not needed!
+5. Click **"Add"**
 
 ---
 
-## Available Tools
+## Step 3: Connect
 
-Once connected, you'll have access to:
+1. Click on the new `gemini` connector
+2. A browser window opens with a login page
+3. Enter your `AUTH_PASSWORD`
+4. Click **Connect**
+5. Done! Claude can now generate images for you
 
-### `generate_image`
-Generate images from text descriptions.
+---
 
-**Parameters:**
-- `prompt` (required): Detailed description of the image
-- `aspect_ratio` (optional): "1:1", "16:9", "9:16", "4:3", "3:4"
-- `style` (optional): "photorealistic", "artistic", "cartoon", "sketch", "3d-render"
+## Environment Variables Summary
 
-### `edit_image`
-Edit existing images with instructions.
-
-**Parameters:**
-- `image_base64` (required): Base64-encoded image
-- `edit_prompt` (required): Instructions for editing
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GEMINI_API_KEY` | Yes | Your Google Gemini API key |
+| `AUTH_PASSWORD` | Yes | Your secret password for login |
+| `SERVER_URL` | Yes | Your full Railway URL (including https://) |
+| `USE_HTTP` | Auto | Set automatically by Dockerfile |
+| `PORT` | Auto | Set automatically by Railway |
 
 ---
 
 ## Testing
 
-After deployment, test the health endpoint:
-
+Check if your server is running:
 ```bash
-curl https://your-deployed-url.com/health
+curl https://your-app.up.railway.app/health
 ```
 
-Should return: `{"status":"ok","server":"gemini-imagen-mcp"}`
+Should return: `{"status":"ok","server":"gemini-imagen-mcp","secured":true}`
+
+---
+
+## Available Tools
+
+Once connected, Claude can use:
+
+### `generate_image`
+- **prompt**: Description of the image to create
+- **aspect_ratio**: "1:1", "16:9", "9:16", "4:3", "3:4"
+- **style**: "photorealistic", "artistic", "cartoon", "sketch", "3d-render"
+
+### `edit_image`
+- **image_base64**: Base64 image to edit
+- **edit_prompt**: Instructions for editing
 
 ---
 
 ## Troubleshooting
 
-**"Invalid API key"**: Verify your GEMINI_API_KEY is correct in environment variables.
+**"Cannot GET /authorize"**: Server needs redeployment with new code. Push updates to GitHub.
 
-**"Model not found"**: The server automatically falls back to gemini-2.0-flash-exp if imagen-3.0 is unavailable for your account.
+**Wrong password page**: Double-check your `AUTH_PASSWORD` in Railway variables.
 
-**Connection refused in Cowork**: Ensure your server is running and the URL is correct. Check the /health endpoint first.
+**Token expired**: Tokens last 24 hours. Just reconnect from Claude.
+
+**Connection refused**: Check that `SERVER_URL` matches your actual Railway URL exactly.
