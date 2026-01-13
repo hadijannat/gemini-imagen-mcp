@@ -1,0 +1,14 @@
+# Render Blueprint
+services:
+  - type: web
+    name: gemini-imagen-mcp
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: USE_HTTP
+        value: "true"
+      - key: PORT
+        value: "3000"
+    healthCheckPath: /health
