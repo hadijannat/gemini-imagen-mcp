@@ -234,20 +234,15 @@ function createMCPServer(): Server {
 // Auth middleware
 function authMiddleware(req: Request, res: Response, next: NextFunction) {
   const baseUrl = getBaseUrl(req);
+  const authHeaderValue = `Bearer realm="mcp", resource="${baseUrl}", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource", scope="mcp:tools"`;
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    res.setHeader(
-      "WWW-Authenticate",
-      `Bearer realm="mcp", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`
-    );
+    res.setHeader("WWW-Authenticate", authHeaderValue);
     return res.status(401).json({ error: "Missing Authorization header" });
   }
   const token = authHeader.substring(7);
   if (!validTokens.has(token)) {
-    res.setHeader(
-      "WWW-Authenticate",
-      `Bearer realm="mcp", resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`
-    );
+    res.setHeader("WWW-Authenticate", authHeaderValue);
     return res.status(403).json({ error: "Invalid token" });
   }
   next();
