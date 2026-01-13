@@ -1,4 +1,5 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
@@ -16,7 +17,7 @@ const PORT = parseInt(process.env.PORT || "3000", 10);
 const USE_HTTP = process.env.USE_HTTP === "true";
 const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
 
-// 🔐 Your secret password - only you should know this!
+// 🔐 Your secret password
 const AUTH_PASSWORD = process.env.AUTH_PASSWORD || "changeme";
 
 if (!GEMINI_API_KEY) {
@@ -24,18 +25,17 @@ if (!GEMINI_API_KEY) {
   process.exit(1);
 }
 
-if (USE_HTTP && AUTH_PASSWORD === "changeme") {
-  console.warn("⚠️  WARNING: Using default password! Set AUTH_PASSWORD environment variable.");
-}
-
 // Initialize Gemini client
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-// Store for OAuth state (in production, use Redis or a database)
+// OAuth storage
 const pendingAuths = new Map<string, { codeChallenge: string; redirectUri: string; expiresAt: number }>();
 const validTokens = new Set<string>();
 
-// Define the tools available
+// SSE transport storage (one per session)
+const transports = new Map<string, SSEServerTransport>();
+
+// Define the tools
 const TOOLS: Tool[] = [
   {
     name: "generate_image",
@@ -46,8 +46,7 @@ const TOOLS: Tool[] = [
       properties: {
         prompt: {
           type: "string",
-          description:
-            "A detailed description of the image to generate. Be specific about style, composition, colors, lighting, and subject matter.",
+          description: "A detailed description of the image to generate.",
         },
         aspect_ratio: {
           type: "string",
@@ -65,8 +64,7 @@ const TOOLS: Tool[] = [
   },
   {
     name: "edit_image",
-    description:
-      "Edit an existing image using Google Imagen 3.0. Provide the base64 image and instructions for editing.",
+    description: "Edit an existing image using AI. Provide the base64 image and instructions.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -76,8 +74,7 @@ const TOOLS: Tool[] = [
         },
         edit_prompt: {
           type: "string",
-          description:
-            "Instructions for how to edit the image (e.g., 'remove the background', 'change the sky to sunset').",
+          description: "Instructions for how to edit the image.",
         },
       },
       required: ["image_base64", "edit_prompt"],
@@ -105,7 +102,6 @@ async function generateImage(
     }
 
     const model = genAI.getGenerativeModel({ model: "imagen-3.0-generate-001" });
-
     const result = await model.generateContent({
       contents: [{ role: "user", parts: [{ text: fullPrompt }] }],
       generationConfig: {
@@ -115,9 +111,7 @@ async function generateImage(
       },
     });
 
-    const response = result.response;
-    const imagePart = response.candidates?.[0]?.content?.parts?.[0];
-
+    const imagePart = result.response.candidates?.[0]?.content?.parts?.[0];
     if (imagePart && "inlineData" in imagePart && imagePart.inlineData) {
       return {
         image_base64: imagePart.inlineData.data,
@@ -128,7 +122,6 @@ async function generateImage(
   } catch (error: any) {
     console.log("Trying fallback model...");
     const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-exp" });
-
     const result = await model.generateContent({
       contents: [{ role: "user", parts: [{ text: `Generate an image: ${prompt}` }] }],
       generationConfig: {
@@ -137,8 +130,7 @@ async function generateImage(
       },
     });
 
-    const response = result.response;
-    for (const part of response.candidates?.[0]?.content?.parts || []) {
+    for (const part of result.response.candidates?.[0]?.content?.parts || []) {
       if ("inlineData" in part && part.inlineData) {
         return {
           image_base64: part.inlineData.data,
@@ -151,12 +143,8 @@ async function generateImage(
 }
 
 // Image editing function
-async function editImage(
-  imageBase64: string,
-  editPrompt: string
-): Promise<{ image_base64: string; mime_type: string }> {
+async function editImage(imageBase64: string, editPrompt: string): Promise<{ image_base64: string; mime_type: string }> {
   const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-exp" });
-
   const result = await model.generateContent({
     contents: [
       {
@@ -173,8 +161,7 @@ async function editImage(
     },
   });
 
-  const response = result.response;
-  for (const part of response.candidates?.[0]?.content?.parts || []) {
+  for (const part of result.response.candidates?.[0]?.content?.parts || []) {
     if ("inlineData" in part && part.inlineData) {
       return {
         image_base64: part.inlineData.data,
@@ -185,60 +172,64 @@ async function editImage(
   throw new Error("Image editing failed");
 }
 
-// Create MCP server (for stdio mode)
-const server = new Server(
-  { name: "gemini-imagen", version: "1.0.0" },
-  { capabilities: { tools: {} } }
-);
+// Create MCP Server instance
+function createMCPServer(): Server {
+  const server = new Server(
+    { name: "gemini-imagen", version: "1.0.0" },
+    { capabilities: { tools: {} } }
+  );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
 
-  try {
-    if (name === "generate_image") {
-      const { prompt, aspect_ratio, style } = args as any;
-      const result = await generateImage(prompt, aspect_ratio, style);
+    try {
+      if (name === "generate_image") {
+        const { prompt, aspect_ratio, style } = args as any;
+        console.log(`🎨 Generating image: "${prompt.substring(0, 50)}..."`);
+        const result = await generateImage(prompt, aspect_ratio, style);
+        return {
+          content: [{ type: "text", text: JSON.stringify({ success: true, ...result }) }],
+        };
+      }
+
+      if (name === "edit_image") {
+        const { image_base64, edit_prompt } = args as any;
+        console.log(`✏️ Editing image: "${edit_prompt.substring(0, 50)}..."`);
+        const result = await editImage(image_base64, edit_prompt);
+        return {
+          content: [{ type: "text", text: JSON.stringify({ success: true, ...result }) }],
+        };
+      }
+
+      return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+    } catch (error: any) {
+      console.error(`Error in ${name}:`, error.message);
       return {
-        content: [{ type: "text", text: JSON.stringify({ success: true, ...result }) }],
+        content: [{ type: "text", text: JSON.stringify({ success: false, error: error.message }) }],
+        isError: true,
       };
     }
+  });
 
-    if (name === "edit_image") {
-      const { image_base64, edit_prompt } = args as any;
-      const result = await editImage(image_base64, edit_prompt);
-      return {
-        content: [{ type: "text", text: JSON.stringify({ success: true, ...result }) }],
-      };
-    }
+  return server;
+}
 
-    return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
-  } catch (error: any) {
-    return {
-      content: [{ type: "text", text: JSON.stringify({ success: false, error: error.message }) }],
-      isError: true,
-    };
-  }
-});
-
-// 🔐 Authentication middleware for MCP endpoints
+// Auth middleware
 function authMiddleware(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
-
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({ error: "Missing or invalid Authorization header" });
+    return res.status(401).json({ error: "Missing Authorization header" });
   }
-
   const token = authHeader.substring(7);
   if (!validTokens.has(token)) {
-    return res.status(403).json({ error: "Invalid or expired token" });
+    return res.status(403).json({ error: "Invalid token" });
   }
-
   next();
 }
 
-// HTTP server with OAuth 2.0 support
+// HTTP server with SSE transport
 function startHttpServer() {
   const app = express();
   app.use(cors());
@@ -246,7 +237,7 @@ function startHttpServer() {
   app.use(express.urlencoded({ extended: true }));
 
   // ============================================
-  // OAuth 2.0 Discovery Endpoint
+  // OAuth 2.0 Discovery
   // ============================================
   app.get("/.well-known/oauth-authorization-server", (req, res) => {
     res.json({
@@ -261,11 +252,8 @@ function startHttpServer() {
     });
   });
 
-  // ============================================
-  // OAuth 2.0 Dynamic Client Registration
-  // ============================================
+  // OAuth registration
   app.post("/register", (req, res) => {
-    // Accept any client registration (we validate via password at /authorize)
     const clientId = crypto.randomUUID();
     res.status(201).json({
       client_id: clientId,
@@ -274,60 +262,34 @@ function startHttpServer() {
     });
   });
 
-  // ============================================
-  // OAuth 2.0 Authorization Endpoint
-  // Shows a login form where you enter your password
-  // ============================================
+  // OAuth authorize (login page)
   app.get("/authorize", (req, res) => {
-    const { response_type, client_id, redirect_uri, code_challenge, code_challenge_method, state } = req.query;
+    const { response_type, redirect_uri, code_challenge, state } = req.query;
 
     if (response_type !== "code") {
       return res.status(400).send("Invalid response_type");
     }
 
-    // Store the pending auth request
     const authId = crypto.randomUUID();
     pendingAuths.set(authId, {
       codeChallenge: code_challenge as string,
       redirectUri: redirect_uri as string,
-      expiresAt: Date.now() + 10 * 60 * 1000, // 10 minutes
+      expiresAt: Date.now() + 10 * 60 * 1000,
     });
 
-    // Show login form
     res.send(`
       <!DOCTYPE html>
       <html>
       <head>
         <title>Gemini Imagen - Login</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
-          body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            display: flex; justify-content: center; align-items: center;
-            min-height: 100vh; margin: 0;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          }
-          .container {
-            background: white; padding: 40px; border-radius: 16px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3); max-width: 400px; width: 90%;
-          }
-          h1 { margin: 0 0 8px 0; color: #333; font-size: 24px; }
+          body { font-family: -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+          .container { background: white; padding: 40px; border-radius: 16px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); max-width: 400px; width: 90%; }
+          h1 { margin: 0 0 8px 0; color: #333; }
           p { color: #666; margin: 0 0 24px 0; }
-          input[type="password"] {
-            width: 100%; padding: 14px; font-size: 16px;
-            border: 2px solid #e0e0e0; border-radius: 8px;
-            box-sizing: border-box; margin-bottom: 16px;
-          }
-          input[type="password"]:focus {
-            outline: none; border-color: #667eea;
-          }
-          button {
-            width: 100%; padding: 14px; font-size: 16px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white; border: none; border-radius: 8px;
-            cursor: pointer; font-weight: 600;
-          }
-          button:hover { opacity: 0.9; }
-          .error { color: #e53e3e; margin-top: 16px; display: none; }
+          input[type="password"] { width: 100%; padding: 14px; font-size: 16px; border: 2px solid #e0e0e0; border-radius: 8px; box-sizing: border-box; margin-bottom: 16px; }
+          button { width: 100%; padding: 14px; font-size: 16px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: 600; }
         </style>
       </head>
       <body>
@@ -346,58 +308,38 @@ function startHttpServer() {
     `);
   });
 
-  // Handle login form submission
+  // Handle login
   app.post("/authorize/submit", (req, res) => {
     const { auth_id, password, state } = req.body;
 
-    // Verify password
     if (password !== AUTH_PASSWORD) {
       return res.status(401).send(`
-        <!DOCTYPE html>
-        <html>
-        <head><title>Error</title>
-        <style>
-          body { font-family: sans-serif; display: flex; justify-content: center;
-                 align-items: center; min-height: 100vh; background: #fee; }
-          .error { background: white; padding: 40px; border-radius: 16px; text-align: center; }
-          h1 { color: #e53e3e; }
-          a { color: #667eea; }
-        </style>
-        </head>
-        <body>
-          <div class="error">
-            <h1>❌ Wrong Password</h1>
-            <p>Please try again.</p>
-            <a href="javascript:history.back()">Go Back</a>
-          </div>
-        </body>
-        </html>
+        <html><body style="font-family:sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#fee;">
+        <div style="background:white;padding:40px;border-radius:16px;text-align:center;">
+        <h1 style="color:#e53e3e;">❌ Wrong Password</h1>
+        <a href="javascript:history.back()">Try Again</a>
+        </div></body></html>
       `);
     }
 
-    // Get pending auth
     const pending = pendingAuths.get(auth_id);
     if (!pending || Date.now() > pending.expiresAt) {
-      return res.status(400).send("Authorization request expired. Please try again.");
+      return res.status(400).send("Authorization expired. Please try again.");
     }
 
-    // Generate authorization code
     const code = crypto.randomUUID();
     pendingAuths.set(code, pending);
     pendingAuths.delete(auth_id);
 
-    // Redirect back to Claude with the code
     const redirectUrl = new URL(pending.redirectUri);
     redirectUrl.searchParams.set("code", code);
     if (state) redirectUrl.searchParams.set("state", state);
 
-    console.log(`✅ User authenticated, redirecting to Claude`);
+    console.log("✅ User authenticated");
     res.redirect(redirectUrl.toString());
   });
 
-  // ============================================
-  // OAuth 2.0 Token Endpoint
-  // ============================================
+  // Token endpoint
   app.post("/token", (req, res) => {
     const { grant_type, code, code_verifier } = req.body;
 
@@ -407,10 +349,9 @@ function startHttpServer() {
 
     const pending = pendingAuths.get(code);
     if (!pending) {
-      return res.status(400).json({ error: "invalid_grant", error_description: "Invalid or expired code" });
+      return res.status(400).json({ error: "invalid_grant" });
     }
 
-    // Verify PKCE code_verifier
     if (pending.codeChallenge) {
       const hash = crypto.createHash("sha256").update(code_verifier || "").digest("base64url");
       if (hash !== pending.codeChallenge) {
@@ -418,63 +359,91 @@ function startHttpServer() {
       }
     }
 
-    // Generate access token
     const accessToken = crypto.randomUUID();
     validTokens.add(accessToken);
     pendingAuths.delete(code);
 
-    console.log(`✅ Token issued successfully`);
+    console.log("✅ Token issued");
     res.json({
       access_token: accessToken,
       token_type: "Bearer",
-      expires_in: 86400, // 24 hours
+      expires_in: 86400,
     });
 
-    // Clean up expired tokens periodically
     setTimeout(() => validTokens.delete(accessToken), 86400 * 1000);
   });
 
   // ============================================
-  // Health Check (no auth required)
+  // Health check
   // ============================================
   app.get("/health", (req, res) => {
     res.json({ status: "ok", server: "gemini-imagen-mcp", secured: true });
   });
 
   // ============================================
-  // MCP Endpoints (auth required)
+  // MCP SSE Endpoint (main connection)
   // ============================================
-  app.get("/mcp/tools", authMiddleware, (req, res) => {
-    res.json({ tools: TOOLS });
+  app.get("/sse", authMiddleware, async (req, res) => {
+    console.log("🔌 New SSE connection");
+
+    const transport = new SSEServerTransport("/messages", res);
+    const sessionId = crypto.randomUUID();
+    transports.set(sessionId, transport);
+
+    const server = createMCPServer();
+
+    res.on("close", () => {
+      console.log("🔌 SSE connection closed");
+      transports.delete(sessionId);
+    });
+
+    await server.connect(transport);
   });
 
-  app.post("/mcp/call", authMiddleware, async (req, res) => {
-    const { name, arguments: args } = req.body;
+  // MCP Messages endpoint
+  app.post("/messages", authMiddleware, async (req, res) => {
+    const sessionId = req.query.sessionId as string;
+    const transport = transports.get(sessionId);
 
-    try {
-      if (name === "generate_image") {
-        const { prompt, aspect_ratio, style } = args;
-        const result = await generateImage(prompt, aspect_ratio, style);
-        return res.json({ success: true, ...result });
-      }
-
-      if (name === "edit_image") {
-        const { image_base64, edit_prompt } = args;
-        const result = await editImage(image_base64, edit_prompt);
-        return res.json({ success: true, ...result });
-      }
-
-      res.status(400).json({ error: `Unknown tool: ${name}` });
-    } catch (error: any) {
-      console.error("Error:", error);
-      res.status(500).json({ error: error.message });
+    if (!transport) {
+      // Handle stateless request
+      const messageTransport = new SSEServerTransport("/messages", res);
+      const server = createMCPServer();
+      await server.connect(messageTransport);
+      await messageTransport.handlePostMessage(req, res);
+      return;
     }
+
+    await transport.handlePostMessage(req, res);
+  });
+
+  // ============================================
+  // Fallback SSE at root /mcp path
+  // ============================================
+  app.get("/mcp", authMiddleware, async (req, res) => {
+    console.log("🔌 New MCP SSE connection at /mcp");
+
+    const transport = new SSEServerTransport("/mcp", res);
+    const server = createMCPServer();
+
+    res.on("close", () => {
+      console.log("🔌 MCP connection closed");
+    });
+
+    await server.connect(transport);
+  });
+
+  app.post("/mcp", authMiddleware, async (req, res) => {
+    const transport = new SSEServerTransport("/mcp", res);
+    const server = createMCPServer();
+    await server.connect(transport);
+    await transport.handlePostMessage(req, res);
   });
 
   app.listen(PORT, () => {
     console.log(`🚀 Gemini Imagen MCP Server running on port ${PORT}`);
-    console.log(`🔐 OAuth 2.0 authentication enabled`);
-    console.log(`   Discovery: ${SERVER_URL}/.well-known/oauth-authorization-server`);
+    console.log(`🔐 OAuth 2.0 + SSE transport enabled`);
+    console.log(`   SSE endpoint: ${SERVER_URL}/sse`);
     console.log(`   Health: ${SERVER_URL}/health`);
   });
 }
@@ -485,6 +454,7 @@ async function main() {
     startHttpServer();
   } else {
     const transport = new StdioServerTransport();
+    const server = createMCPServer();
     await server.connect(transport);
     console.error("Gemini Imagen MCP server running on stdio");
   }
