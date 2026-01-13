@@ -233,7 +233,16 @@ function authMiddleware(req: Request, res: Response, next: NextFunction) {
 function startHttpServer() {
   const app = express();
   app.use(cors());
-  app.use(express.json({ limit: "50mb" }));
+
+  // Don't parse JSON for MCP endpoints - let handlePostMessage do it
+  app.use((req, res, next) => {
+    if (req.path === "/" && req.method === "POST") {
+      // Skip body parsing for MCP POST - handlePostMessage handles it
+      next();
+    } else {
+      express.json({ limit: "50mb" })(req, res, next);
+    }
+  });
   app.use(express.urlencoded({ extended: true }));
 
   // ============================================
@@ -418,10 +427,14 @@ function startHttpServer() {
     }
 
     try {
-      await transport.handlePostMessage(req, res, req.body);
+      // handlePostMessage reads and parses the body itself
+      await transport.handlePostMessage(req, res);
     } catch (error: any) {
       console.error(`❌ Error handling message: ${error.message}`);
-      res.status(500).json({ error: error.message });
+      // Only send error if headers haven't been sent
+      if (!res.headersSent) {
+        res.status(500).json({ error: error.message });
+      }
     }
   });
 
